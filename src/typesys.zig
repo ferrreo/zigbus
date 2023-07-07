@@ -352,3 +352,84 @@ test "can parse a nested struct with multiple types in a signature" {
         signature.vectorized.items,
     );
 }
+
+test "can parse a nested nested struct with multiple types in a signature" {
+    var signature = try Signature.make("(y(y(y(y))))", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 1 },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse an array in a signature" {
+    var signature = try Signature.make("ay", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .ARRAY_TYPE = {} },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse an array of struct" {
+    var signature = try Signature.make("a(y)", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .ARRAY_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 1 },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse an array of array" {
+    var signature = try Signature.make("aay", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .ARRAY_TYPE = {} },
+            DBusType{ .ARRAY_TYPE = {} },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse an array of dict entries" {
+    var signature = try Signature.make("a{ys}", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .ARRAY_TYPE = {} },
+            DBusType{ .DICT_ENTRY_TYPE = {} },
+            DBusType{ .DICT_ENTRY_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRING_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
