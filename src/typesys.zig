@@ -137,7 +137,6 @@ pub const TypeSigToken = enum(u8) {
 };
 
 pub const Signature = struct {
-    bytes: []const u8 = undefined,
     vectorized: std.ArrayList(DBusType) = undefined,
 
     const Self = @This();
@@ -147,11 +146,9 @@ pub const Signature = struct {
     };
 
     pub fn make(bytes: []const u8, allocator: Allocator) !Self {
-        var sig = Signature{
-            .bytes = bytes,
-        };
+        var sig = Signature{};
 
-        try sig.parse(allocator);
+        try sig.parse(bytes, allocator);
 
         return sig;
     }
@@ -160,41 +157,17 @@ pub const Signature = struct {
         self.vectorized.deinit();
     }
 
-    fn parse(self: *Self, allocator: Allocator) !void {
-        self.vectorized = try std.ArrayList(DBusType).initCapacity(allocator, self.bytes.len * 2);
-        var stack_level: u32 = 0;
-        _ = stack_level;
+    fn parse(self: *Self, bytes: []const u8, allocator: Allocator) !void {
+        self.vectorized = try std.ArrayList(DBusType).initCapacity(allocator, bytes.len * 2);
         var pos: usize = 0;
 
-        while (pos < self.bytes.len) : (pos += 1) {
-            const c = self.bytes[pos];
-            const token: TypeSigToken = @enumFromInt(c);
-            switch (token) {
-                TypeSigToken.NONE => return error.InvalidSignature,
-                TypeSigToken.BYTE,
-                TypeSigToken.BOOLEAN,
-                TypeSigToken.INT16,
-                TypeSigToken.UINT16,
-                TypeSigToken.INT32,
-                TypeSigToken.UINT32,
-                TypeSigToken.INT64,
-                TypeSigToken.UINT64,
-                TypeSigToken.DOUBLE,
-                TypeSigToken.UNIX_FD,
-                TypeSigToken.STRING,
-                TypeSigToken.OBJECT_PATH,
-                TypeSigToken.SIGNATURE,
-                TypeSigToken.VARIANT,
-                => try self.advance_single(&pos),
-                TypeSigToken.STRUCT_OPEN => try self.advance_struct(&pos),
-                TypeSigToken.STRUCT_CLOSE => unreachable,
-                else => unreachable,
-            }
+        while (pos < bytes.len) : (pos += 1) {
+            try self.next(bytes, &pos);
         }
     }
 
-    fn advance_single(self: *Self, pos: *usize) !void {
-        const token: TypeSigToken = @enumFromInt(self.bytes[pos.*]);
+    fn next(self: *Self, bytes: []const u8, pos: *usize) !void {
+        const token: TypeSigToken = @enumFromInt(bytes[pos.*]);
         switch (token) {
             TypeSigToken.BYTE => try self.vectorized.append(DBusType{ .BYTE_TYPE = {} }),
             TypeSigToken.BOOLEAN => try self.vectorized.append(DBusType{ .BOOLEAN_TYPE = {} }),
@@ -210,27 +183,44 @@ pub const Signature = struct {
             TypeSigToken.OBJECT_PATH => try self.vectorized.append(DBusType{ .OBJECT_PATH_TYPE = {} }),
             TypeSigToken.SIGNATURE => try self.vectorized.append(DBusType{ .SIGNATURE_TYPE = {} }),
             TypeSigToken.VARIANT => try self.vectorized.append(DBusType{ .VARIANT_TYPE = {} }),
-            else => return SignatureError.NotSingleType,
-        }
-    }
-
-    fn advance_struct(self: *Self, pos: *usize) !void {
-        // skip '('
-        pos.* += 1;
-        var struct_length: u8 = 0;
-        try self.vectorized.append(DBusType{ .STRUCT_TYPE = {} });
-        try self.vectorized.append(DBusType{ .STRUCT_LENGTH = 0 });
-        const length_pos: usize = self.vectorized.items.len - 1;
-        while (pos.* < self.bytes.len) : (pos.* += 1) {
-            const token: TypeSigToken = @enumFromInt(self.bytes[pos.*]);
-            if (token == TypeSigToken.STRUCT_CLOSE) {
+            TypeSigToken.ARRAY => try self.vectorized.append(DBusType{ .ARRAY_TYPE = {} }),
+            TypeSigToken.STRUCT_OPEN => {
                 pos.* += 1;
-                break;
-            }
-            try self.advance_single(pos);
-            struct_length += 1;
+                var struct_length: u8 = 0;
+                try self.vectorized.append(DBusType{ .STRUCT_TYPE = {} });
+                try self.vectorized.append(DBusType{ .STRUCT_LENGTH = 0 });
+                const length_pos: usize = self.vectorized.items.len - 1;
+                while (pos.* < bytes.len) : (pos.* += 1) {
+                    const inner_token: TypeSigToken = @enumFromInt(bytes[pos.*]);
+                    if (inner_token == TypeSigToken.STRUCT_CLOSE) {
+                        pos.* += 1;
+                        break;
+                    }
+                    try self.next(bytes, pos);
+                    struct_length += 1;
+                }
+                self.vectorized.items[length_pos] = DBusType{ .STRUCT_LENGTH = struct_length };
+            },
+            TypeSigToken.STRUCT_CLOSE => unreachable, // Should be handled by STRUCT_OPEN
+            TypeSigToken.DICT_OPEN => {
+                pos.* += 1;
+                var dict_entry_length: u8 = 0;
+                try self.vectorized.append(DBusType{ .DICT_ENTRY_TYPE = {} });
+                try self.vectorized.append(DBusType{ .DICT_ENTRY_LENGTH = 0 });
+                const dict_entry_pos = self.vectorized.items.len - 1;
+                while (pos.* < bytes.len) : (pos.* += 1) {
+                    const inner_token: TypeSigToken = @enumFromInt(bytes[pos.*]);
+                    if (inner_token == TypeSigToken.DICT_CLOSE) {
+                        pos.* += 1;
+                        break;
+                    }
+                    try self.next(bytes, pos);
+                    dict_entry_length += 1;
+                }
+                self.vectorized.items[dict_entry_pos] = DBusType{ .DICT_ENTRY_LENGTH = dict_entry_length };
+            },
+            else => unreachable,
         }
-        self.vectorized.items[length_pos] = DBusType{ .STRUCT_LENGTH = struct_length };
     }
 };
 
