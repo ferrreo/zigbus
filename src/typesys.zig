@@ -81,42 +81,6 @@ pub const DBusType = union(enum) {
             .DICT_ENTRY => 8,
         };
     }
-
-    pub fn alignment_type(comptime T: DBusType) type {
-        return switch (T) {
-            .STRING => u32,
-            .OBJECT_PATH => u32,
-            .SIGNATURE => u8,
-
-            .VARIANT => u8,
-            .ARRAY => u32,
-            .STRUCT => u64,
-            .DICT_ENTRY => u64,
-            else => unreachable,
-        };
-    }
-
-    pub fn nativeType(comptime T: DBusType) type {
-        return switch (T) {
-            .BYTE => u8,
-            .BOOLEAN => bool,
-            .INT16 => i16,
-            .UINT16 => u16,
-            .INT32 => i32,
-            .UINT32 => u32,
-            .INT64 => i64,
-            .UINT64 => u64,
-            .DOUBLE => f64,
-            .UNIX_FD => i32,
-
-            .STRING => []const u8,
-            .OBJECT_PATH => []const u8,
-            .SIGNATURE => []const u8,
-
-            // Container types has no correspnding native types
-            else => unreachable,
-        };
-    }
 };
 
 pub const DBusValue = union(DBusType) {
@@ -197,11 +161,9 @@ pub const Signature = struct {
     }
 
     fn parse(self: *Self, allocator: Allocator) !void {
-        var vectorized = try std.ArrayList(u8).initCapacity(allocator, self.bytes.len * 2);
-        var parse_stack = try std.ArrayList(u8).initCapacity(allocator, self.bytes.len / 2);
-        defer parse_stack.deinit();
+        self.vectorized = try std.ArrayList(DBusType).initCapacity(allocator, self.bytes.len * 2);
         var stack_level: u32 = 0;
-
+        _ = stack_level;
         var pos: usize = 0;
 
         while (pos < self.bytes.len) : (pos += 1) {
@@ -210,6 +172,7 @@ pub const Signature = struct {
             switch (token) {
                 TypeSigToken.NONE => return error.InvalidSignature,
                 TypeSigToken.BYTE,
+                TypeSigToken.BOOLEAN,
                 TypeSigToken.INT16,
                 TypeSigToken.UINT16,
                 TypeSigToken.INT32,
@@ -228,8 +191,6 @@ pub const Signature = struct {
                 else => unreachable,
             }
         }
-
-        self.vectorized = vectorized;
     }
 
     fn advance_single(self: *Self, pos: *usize) !void {
@@ -251,15 +212,15 @@ pub const Signature = struct {
             TypeSigToken.VARIANT => try self.vectorized.append(DBusType{ .VARIANT_TYPE = {} }),
             else => return SignatureError.NotSingleType,
         }
-        pos.* += 1;
     }
 
     fn advance_struct(self: *Self, pos: *usize) !void {
+        // skip '('
         pos.* += 1;
         var struct_length: u8 = 0;
-        try self.vectorized.append(DBusType( .STRUCT_TYPE = {} ));
+        try self.vectorized.append(DBusType{ .STRUCT_TYPE = {} });
         try self.vectorized.append(DBusType{ .STRUCT_LENGTH = 0 });
-        const length_pos: usize = self.vectorized.len - 1;
+        const length_pos: usize = self.vectorized.items.len - 1;
         while (pos.* < self.bytes.len) : (pos.* += 1) {
             const token: TypeSigToken = @enumFromInt(self.bytes[pos.*]);
             if (token == TypeSigToken.STRUCT_CLOSE) {
@@ -274,12 +235,120 @@ pub const Signature = struct {
 };
 
 test "can parse an empty signature string" {
-    const signature = try Signature.make("", testing.allocator);
+    var signature = try Signature.make("", testing.allocator);
     defer signature.deinit();
-    try testing.expectEqual(signature.vectorized.len, 0);
+    try testing.expectEqual(signature.vectorized.items.len, 0);
 }
 
 test "can parse a simple signature string" {
-    const signature = try Signature.make("y", testing.allocator);
-    try testing.expectEqualSlices(DBusType, &.{DBusType{ .BYTE_TYPE = {}}}, &signature);
+    var signature = try Signature.make("ybnqiuxtdhsogv", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .BOOLEAN_TYPE = {} },
+            DBusType{ .INT16_TYPE = {} },
+            DBusType{ .UINT16_TYPE = {} },
+            DBusType{ .INT32_TYPE = {} },
+            DBusType{ .UINT32_TYPE = {} },
+            DBusType{ .INT64_TYPE = {} },
+            DBusType{ .UINT64_TYPE = {} },
+            DBusType{ .DOUBLE_TYPE = {} },
+            DBusType{ .UNIX_FD_TYPE = {} },
+            DBusType{ .STRING_TYPE = {} },
+            DBusType{ .OBJECT_PATH_TYPE = {} },
+            DBusType{ .SIGNATURE_TYPE = {} },
+            DBusType{ .VARIANT_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse a struct in a signature" {
+    var signature = try Signature.make("(y)", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 1 },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse a nested struct in a signature" {
+    var signature = try Signature.make("(y(y))", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 1 },
+            DBusType{ .BYTE_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse a struct with multiple types in a signature" {
+    var signature = try Signature.make("(ybnqiuxtdhsogv)", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 14 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .BOOLEAN_TYPE = {} },
+            DBusType{ .INT16_TYPE = {} },
+            DBusType{ .UINT16_TYPE = {} },
+            DBusType{ .INT32_TYPE = {} },
+            DBusType{ .UINT32_TYPE = {} },
+            DBusType{ .INT64_TYPE = {} },
+            DBusType{ .UINT64_TYPE = {} },
+            DBusType{ .DOUBLE_TYPE = {} },
+            DBusType{ .UNIX_FD_TYPE = {} },
+            DBusType{ .STRING_TYPE = {} },
+            DBusType{ .OBJECT_PATH_TYPE = {} },
+            DBusType{ .SIGNATURE_TYPE = {} },
+            DBusType{ .VARIANT_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+}
+
+test "can parse a nested struct with multiple types in a signature" {
+    var signature = try Signature.make("(y(ybnqiuxtdhsogv))", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 2 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .STRUCT_TYPE = {} },
+            DBusType{ .STRUCT_LENGTH = 14 },
+            DBusType{ .BYTE_TYPE = {} },
+            DBusType{ .BOOLEAN_TYPE = {} },
+            DBusType{ .INT16_TYPE = {} },
+            DBusType{ .UINT16_TYPE = {} },
+            DBusType{ .INT32_TYPE = {} },
+            DBusType{ .UINT32_TYPE = {} },
+            DBusType{ .INT64_TYPE = {} },
+            DBusType{ .UINT64_TYPE = {} },
+            DBusType{ .DOUBLE_TYPE = {} },
+            DBusType{ .UNIX_FD_TYPE = {} },
+            DBusType{ .STRING_TYPE = {} },
+            DBusType{ .OBJECT_PATH_TYPE = {} },
+            DBusType{ .SIGNATURE_TYPE = {} },
+            DBusType{ .VARIANT_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
 }
