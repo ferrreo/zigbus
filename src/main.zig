@@ -1,6 +1,5 @@
 const std = @import("std");
 const testing = std.testing;
-const msg = @import("msg.zig");
 
 const Connector = struct {
     pub fn init() void {}

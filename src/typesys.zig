@@ -1,6 +1,8 @@
 ///! This module implements the D-Bus type system.
 const std = @import("std");
+const testing = std.testing;
 const Endian = std.builtin.Endian;
+const Allocator = std.mem.Allocator;
 
 // Array: array of type T
 // Arrays have a maximum length defined to be 2 to the 26th power or 67108864 (64 MiB).
@@ -22,49 +24,38 @@ const Endian = std.builtin.Endian;
 // 0x01 0x74 0x00                          signature bytes (length = 1, signature = 't' and trailing nul)
 //                0x00 0x00 0x00 0x00 0x00 padding to 8-byte boundary
 // 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x05 8 bytes of contained value
-pub const DBusTypeTag = enum {
-    BYTE,
-    BOOLEAN,
-    INT16,
-    UINT16,
-    INT32,
-    UINT32,
-    INT64,
-    UINT64,
-    DOUBLE,
-    UNIX_FD,
 
-    STRING,
-    OBJECT_PATH,
-    SIGNATURE,
+/// Represents a DBus type, vectorized.
+/// Consuming a signature (a sequence of DBusType) is done sequentially, always.
+pub const DBusType = union(enum) {
+    BYTE_TYPE: void,
+    BOOLEAN_TYPE: void,
+    INT16_TYPE: void,
+    UINT16_TYPE: void,
+    INT32_TYPE: void,
+    UINT32_TYPE: void,
+    INT64_TYPE: void,
+    UINT64_TYPE: void,
+    DOUBLE_TYPE: void,
+    UNIX_FD_TYPE: void,
 
-    VARIANT,
-    STRUCT,
-    ARRAY,
-    DICT_ENTRY,
-};
+    STRING_TYPE: void,
+    OBJECT_PATH_TYPE: void,
+    SIGNATURE_TYPE: void,
 
-/// Represents a type instance in DBus type system
-pub const DBusType = union(DBusTypeTag) {
-    BYTE: void,
-    BOOLEAN: void,
-    INT16: void,
-    UINT16: void,
-    INT32: void,
-    UINT32: void,
-    INT64: void,
-    UINT64: void,
-    DOUBLE: void,
-    UNIX_FD: void,
+    VARIANT_TYPE: void,
 
-    STRING: void,
-    OBJECT_PATH: void,
-    SIGNATURE: void,
+    // A struct type is vectorized into (length, type1, type2, ...).
+    // To use a struct type, the caller read types `length` times.
+    STRUCT_TYPE: void,
+    STRUCT_LENGTH: u8,
 
-    VARIANT: void,
-    STRUCT: struct { inner: []DBusType },
-    ARRAY: struct { inner: []DBusType },
-    DICT_ENTRY: struct { key: DBusType, value: DBusType },
+    // An array is always followed by a single complete type.
+    ARRAY_TYPE: void,
+
+    // An dict entry works exactly as same as a struct.
+    DICT_ENTRY_TYPE: void,
+    DICT_ENTRY_LENGTH: u8,
 
     pub fn alignment(comptime T: DBusType) comptime_int {
         return switch (T) {
@@ -150,10 +141,6 @@ pub const DBusValue = union(DBusType) {
     DICT_ENTRY: struct { key: DBusValue, value: DBusValue },
 };
 
-// The simplest type codes are the basic types, which are the types whose structure is entirely defined by their 1-character type code.
-// Basic types consist of fixed types and string-like types.
-
-// Token for parsing signature
 pub const TypeSigToken = enum(u8) {
     NONE = 0, //  Not a valid type code. For termination.
     BYTE = 'y',
@@ -176,95 +163,123 @@ pub const TypeSigToken = enum(u8) {
 
     VARIANT = 'v',
 
-    STRUCT_R = 'r',
+    // STRUCT_R = 'r',
     STRUCT_OPEN = '(',
     STRUCT_CLOSE = ')',
     ARRAY = 'a',
-    DICT_E = 'e',
+    // DICT_E = 'e',
     DICT_OPEN = '{',
     DICT_CLOSE = '}',
 };
 
-pub const SignatureReader = struct {
-    signature: []const u8,
-    len: u32 = 0,
-    pos: u32 = 0,
+pub const Signature = struct {
+    bytes: []const u8 = undefined,
+    vectorized: std.ArrayList(DBusType) = undefined,
 
     const Self = @This();
 
-    pub fn init(bytes: []const u8) !Self {
-        // The length of signature is stored in the first byte,
-        // and the length is limited to 255.
-        const len = std.mem.readInt(u8, bytes[0..1], Endian.Little);
-
-        return Self{
-            .signature = bytes[1..],
-            .len = len,
-        };
-    }
-
-    pub fn next(self: *Self) !DBusType {
-        if (self.pos >= self.len) {
-            return error.Unreachable;
-        }
-        const dbus_type = self.signature[self.pos];
-        self.pos += 1;
-        return dbus_type;
-    }
-};
-
-test "sigature reader can read a signature from a byte array" {
-    const bytes = [_]u8{11} ++ "yyyyuua(uv)";
-    var reader = try SignatureReader.init(bytes);
-    _ = reader;
-    const expected = [_]DBusType{
-        DBusType.BYTE,
-        DBusType.BYTE,
-        DBusType.BYTE,
-        DBusType.BYTE,
-        DBusType.UINT32,
-        DBusType.UINT32,
-        DBusType{
-            .ARRAY = .{
-                .inner = DBusType{
-                    .STRUCT = .{
-                        .inner = []DBusType{
-                            DBusType.UINT32,
-                            DBusType.VARIANT,
-                        },
-                    },
-                },
-            },
-        },
+    const SignatureError = error{
+        NotSingleType,
     };
 
-    var output: DBusType = try reader.next();
-    while (output != null) : (output = try reader.next()) {
-        const expected_type = expected[reader.pos - 1];
-        expect(output == expected_type);
-    }
-}
+    pub fn make(bytes: []const u8, allocator: Allocator) !Self {
+        var sig = Signature{
+            .bytes = bytes,
+        };
 
-pub fn read_byte(bytes: []const u8) .{ u8, []const u8 } {
-    return .{ bytes[0], bytes[1..] };
-}
+        try sig.parse(allocator);
 
-/// Represents a single complete type.
-pub const SingleCompleteType = struct {
-    signature: []const u8, // The type signature represent this dbus type
-
-    const Self = @This();
-
-    pub fn eql(this: *Self, other: *Self) bool {
-        return std.mem.eql(this.signature, other.signature);
+        return sig;
     }
 
-    // Given a type signature, a block of bytes can be converted into typed values.
-    // Byte order and alignment issues are handled uniformly for all D-Bus types.
-    // Each value in a block of bytes is aligned "naturally," for example 4-byte values are aligned to a 4-byte boundary, and 8-byte values to an 8-byte boundary.
-    // As an exception to natural alignment, STRUCT and DICT_ENTRY values are always aligned to an 8-byte boundary, regardless of the alignments of their contents.
-    pub fn marshall(this: *Self, message: []const u8) []const u8 {
-        _ = this;
-        return message;
+    pub fn deinit(self: *Self) void {
+        self.vectorized.deinit();
+    }
+
+    fn parse(self: *Self, allocator: Allocator) !void {
+        var vectorized = try std.ArrayList(u8).initCapacity(allocator, self.bytes.len * 2);
+        var parse_stack = try std.ArrayList(u8).initCapacity(allocator, self.bytes.len / 2);
+        defer parse_stack.deinit();
+        var stack_level: u32 = 0;
+
+        var pos: usize = 0;
+
+        while (pos < self.bytes.len) : (pos += 1) {
+            const c = self.bytes[pos];
+            const token: TypeSigToken = @enumFromInt(c);
+            switch (token) {
+                TypeSigToken.NONE => return error.InvalidSignature,
+                TypeSigToken.BYTE,
+                TypeSigToken.INT16,
+                TypeSigToken.UINT16,
+                TypeSigToken.INT32,
+                TypeSigToken.UINT32,
+                TypeSigToken.INT64,
+                TypeSigToken.UINT64,
+                TypeSigToken.DOUBLE,
+                TypeSigToken.UNIX_FD,
+                TypeSigToken.STRING,
+                TypeSigToken.OBJECT_PATH,
+                TypeSigToken.SIGNATURE,
+                TypeSigToken.VARIANT,
+                => try self.advance_single(&pos),
+                TypeSigToken.STRUCT_OPEN => try self.advance_struct(&pos),
+                TypeSigToken.STRUCT_CLOSE => unreachable,
+                else => unreachable,
+            }
+        }
+
+        self.vectorized = vectorized;
+    }
+
+    fn advance_single(self: *Self, pos: *usize) !void {
+        const token: TypeSigToken = @enumFromInt(self.bytes[pos.*]);
+        switch (token) {
+            TypeSigToken.BYTE => try self.vectorized.append(DBusType{ .BYTE_TYPE = {} }),
+            TypeSigToken.BOOLEAN => try self.vectorized.append(DBusType{ .BOOLEAN_TYPE = {} }),
+            TypeSigToken.INT16 => try self.vectorized.append(DBusType{ .INT16_TYPE = {} }),
+            TypeSigToken.UINT16 => try self.vectorized.append(DBusType{ .UINT16_TYPE = {} }),
+            TypeSigToken.INT32 => try self.vectorized.append(DBusType{ .INT32_TYPE = {} }),
+            TypeSigToken.UINT32 => try self.vectorized.append(DBusType{ .UINT32_TYPE = {} }),
+            TypeSigToken.INT64 => try self.vectorized.append(DBusType{ .INT64_TYPE = {} }),
+            TypeSigToken.UINT64 => try self.vectorized.append(DBusType{ .UINT64_TYPE = {} }),
+            TypeSigToken.DOUBLE => try self.vectorized.append(DBusType{ .DOUBLE_TYPE = {} }),
+            TypeSigToken.UNIX_FD => try self.vectorized.append(DBusType{ .UNIX_FD_TYPE = {} }),
+            TypeSigToken.STRING => try self.vectorized.append(DBusType{ .STRING_TYPE = {} }),
+            TypeSigToken.OBJECT_PATH => try self.vectorized.append(DBusType{ .OBJECT_PATH_TYPE = {} }),
+            TypeSigToken.SIGNATURE => try self.vectorized.append(DBusType{ .SIGNATURE_TYPE = {} }),
+            TypeSigToken.VARIANT => try self.vectorized.append(DBusType{ .VARIANT_TYPE = {} }),
+            else => return SignatureError.NotSingleType,
+        }
+        pos.* += 1;
+    }
+
+    fn advance_struct(self: *Self, pos: *usize) !void {
+        pos.* += 1;
+        var struct_length: u8 = 0;
+        try self.vectorized.append(DBusType( .STRUCT_TYPE = {} ));
+        try self.vectorized.append(DBusType{ .STRUCT_LENGTH = 0 });
+        const length_pos: usize = self.vectorized.len - 1;
+        while (pos.* < self.bytes.len) : (pos.* += 1) {
+            const token: TypeSigToken = @enumFromInt(self.bytes[pos.*]);
+            if (token == TypeSigToken.STRUCT_CLOSE) {
+                pos.* += 1;
+                break;
+            }
+            try self.advance_single(pos);
+            struct_length += 1;
+        }
+        self.vectorized.items[length_pos] = DBusType{ .STRUCT_LENGTH = struct_length };
     }
 };
+
+test "can parse an empty signature string" {
+    const signature = try Signature.make("", testing.allocator);
+    defer signature.deinit();
+    try testing.expectEqual(signature.vectorized.len, 0);
+}
+
+test "can parse a simple signature string" {
+    const signature = try Signature.make("y", testing.allocator);
+    try testing.expectEqualSlices(DBusType, &.{DBusType{ .BYTE_TYPE = {}}}, &signature);
+}
