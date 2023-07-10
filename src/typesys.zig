@@ -59,50 +59,52 @@ pub const DBusType = union(enum) {
 
     pub fn alignment(comptime T: DBusType) comptime_int {
         return switch (T) {
-            .BYTE => 1,
-            .BOOLEAN => 4,
-            .INT16 => 2,
-            .UINT16 => 2,
-            .INT32 => 4,
-            .UINT32 => 4,
-            .INT64 => 8,
-            .UINT64 => 8,
-            .DOUBLE => 8,
-            .UNIX_FD => 4,
+            DBusType.BYTE_TYPE => 1,
+            DBusType.BOOLEAN_TYPE => 4,
+            DBusType.INT16_TYPE => 2,
+            DBusType.UINT16_TYPE => 2,
+            DBusType.INT32_TYPE => 4,
+            DBusType.UINT32_TYPE => 4,
+            DBusType.INT64_TYPE => 8,
+            DBusType.UINT64_TYPE => 8,
+            DBusType.DOUBLE_TYPE => 8,
+            DBusType.UNIX_FD_TYPE => 4,
 
             // For string-like types, it returns the alignment for the length value
-            .STRING => 4,
-            .OBJECT_PATH => 4,
-            .SIGNATURE => 1, // The length of a signature does not exceed 255
+            DBusType.STRING_TYPE => 4,
+            DBusType.OBJECT_PATH_TYPE => 4,
+            DBusType.SIGNATURE_TYPE => 1, // The length of a signature does not exceed 255
 
-            .VARIANT => 1,
-            .ARRAY => 4,
-            .STRUCT => 8,
-            .DICT_ENTRY => 8,
+            DBusType.VARIANT_TYPE => 1,
+            DBusType.ARRAY_TYPE => 4,
+
+            DBusType.STRUCT_TYPE => 8,
+            DBusType.DICT_ENTRY_TYPE => 8,
+            else => unreachable,
         };
     }
 };
 
 pub const DBusValue = union(DBusType) {
-    BYTE: u8,
-    BOOLEAN: bool,
-    INT16: i16,
-    UINT16: u16,
-    INT32: i32,
-    UINT32: u32,
-    INT64: i64,
-    UINT64: u64,
-    DOUBLE: f64,
-    UNIX_FD: i32,
+    BYTE_TYPE: u8,
+    BOOLEAN_TYPE: bool,
+    INT16_TYPE: i16,
+    UINT16_TYPE: u16,
+    INT32_TYPE: i32,
+    UINT32_TYPE: u32,
+    INT64_TYPE: i64,
+    UINT64_TYPE: u64,
+    DOUBLE_TYPE: f64,
+    UNIX_FD_TYPE: i32,
 
-    STRING: []const u8,
-    OBJECT_PATH: []const u8,
-    SIGNATURE: []const u8,
+    STRING_TYPE: []const u8,
+    OBJECT_PATH_TYPE: []const u8,
+    SIGNATURE_TYPE: []const u8,
 
-    VARIANT: DBusValue,
-    STRUCT: struct { inner: []DBusValue },
-    ARRAY: struct { inner: []DBusValue },
-    DICT_ENTRY: struct { key: DBusValue, value: DBusValue },
+    VARIANT_TYPE: DBusValue,
+    ARRAY_TYPE: struct { inner: []DBusValue },
+    STRUCT_TYPE: struct { inner: []DBusValue },
+    DICT_ENTRY_TYPE: struct { key: DBusValue, value: DBusValue },
 };
 
 pub const TypeSigToken = enum(u8) {
@@ -143,6 +145,7 @@ pub const Signature = struct {
 
     const SignatureError = error{
         NotSingleType,
+        EmptySignature,
     };
 
     pub fn make(bytes: []const u8, allocator: Allocator) !Self {
@@ -159,10 +162,15 @@ pub const Signature = struct {
 
     fn parse(self: *Self, bytes: []const u8, allocator: Allocator) !void {
         self.vectorized = try std.ArrayList(DBusType).initCapacity(allocator, bytes.len * 2);
+        errdefer self.vectorized.deinit();
         var pos: usize = 0;
 
         while (pos < bytes.len) : (pos += 1) {
             try self.next(bytes, &pos);
+        }
+
+        if (self.vectorized.items.len == 0) {
+            return SignatureError.EmptySignature;
         }
     }
 
@@ -224,10 +232,12 @@ pub const Signature = struct {
     }
 };
 
-test "can parse an empty signature string" {
-    var signature = try Signature.make("", testing.allocator);
-    defer signature.deinit();
-    try testing.expectEqual(signature.vectorized.items.len, 0);
+test "report an error on an empty signature string" {
+    _ = Signature.make("", testing.allocator) catch |err| {
+        try testing.expect(
+            Signature.SignatureError.EmptySignature == err,
+        );
+    };
 }
 
 test "can parse a simple signature string" {
