@@ -101,5 +101,5 @@ test "validate object path checking 2" {
 test {
     _ = @import("typesys.zig");
     _ = @import("bytes.zig");
-    // _ = @import("msg.zig");
+    _ = @import("msg.zig");
 }

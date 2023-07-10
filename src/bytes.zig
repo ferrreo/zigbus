@@ -25,7 +25,7 @@ pub const BytesReader = struct {
         EndOfStream,
     };
 
-    fn alignBy(self: *Self, comptime alignment: comptime_int) !void {
+    pub fn alignBy(self: *Self, comptime alignment: comptime_int) !void {
         if (alignment == 1) {
             return;
         }
