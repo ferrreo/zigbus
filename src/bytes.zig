@@ -203,7 +203,6 @@ test "reader can consume array of int64" {
     var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Big };
     const array_length = try reader.next(u32);
     try testing.expectEqual(@as(u32, 8), array_length);
-    _ = try reader.next(u32);
     const five: i64 = try reader.next(i64); // comsume 8 bytes
     try testing.expectEqual(@as(i64, 5), five);
     const last = reader.next(i64);
