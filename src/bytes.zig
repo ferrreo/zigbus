@@ -25,22 +25,32 @@ pub const BytesReader = struct {
         EndOfStream,
     };
 
+    fn alignBy(self: *Self, comptime alignment: comptime_int) !void {
+        if (alignment == 1) {
+            return;
+        }
+        if (self.pos % alignment == 0) {
+            return;
+        }
+        try self.skip(alignment - (self.pos % alignment));
+    }
+
     /// Consume bytes of a fix-sized type.
     pub fn next(self: *Self, comptime T: anytype) BytesReaderError!T {
-        const alignment = @sizeOf(T);
-        if (alignment != 1 and alignment != 2 and alignment != 4 and alignment != 8) {
-            std.debug.print("alignment: {d}\n", .{alignment});
+        try self.alignBy(@sizeOf(T));
+        const size = @sizeOf(T);
+        if (size != 1 and size != 2 and size != 4 and size != 8) {
             return BytesReaderError.InvalidAlignment;
         }
         if (self.pos == self.bytes.len) {
             return BytesReaderError.EndOfStream;
         }
-        if (alignment + self.pos > self.bytes.len) {
+        if (size + self.pos > self.bytes.len) {
             return BytesReaderError.InvalidAlignment;
         }
 
-        const value = std.mem.readIntSlice(T, self.bytes[self.pos..(self.pos + alignment)], self.endian);
-        self.pos += alignment;
+        const value = std.mem.readIntSlice(T, self.bytes[self.pos..(self.pos + size)], self.endian);
+        self.pos += size;
         return value;
     }
 
@@ -83,10 +93,28 @@ pub const BytesReader = struct {
         }
         return str[0..(end + 1)];
     }
+
+    /// Consume bytes of a signature string.
+    pub fn nextSignature(self: *Self) ![]const u8 {
+        const length: u8 = try self.next(u8);
+        if (length == 0) {
+            return BytesReaderError.InvalidLength;
+        }
+        const str: []const u8 = try self.take(@as(usize, length));
+
+        return str;
+    }
 };
 
 test "reader can comsume basic types -- u32 little endian" {
-    const bytes = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    // zig fmt: off
+    const bytes = [_]u8{
+        0x12,
+        0x00, // padding for i16 alignment
+        0x34, 0x56,
+        0x78,
+    };
+    // zig fmt: on
     var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Little };
     const first = try reader.next(u8);
     try testing.expectEqual(@as(u8, 0x12), first);
@@ -97,13 +125,13 @@ test "reader can comsume basic types -- u32 little endian" {
 }
 
 test "reader can comsume basic types -- u32 big endian" {
-    const bytes = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    const bytes = [_]u8{ 0x12, 0x00, 0x34, 0x56, 0x78 };
     var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Big };
     const first = try reader.next(u8);
-    const second = try reader.next(i16);
-    const last = try reader.next(u8);
     try testing.expectEqual(first, 0x12);
+    const second = try reader.next(i16);
     try testing.expectEqual(second, 0x3456);
+    const last = try reader.next(u8);
     try testing.expectEqual(last, 0x78);
 }
 
@@ -154,11 +182,11 @@ test "reader can consume many strings" {
 }
 
 test "reader stops when it meets end of bytes" {
-    const bytes = [_]u8{ 0x12, 0x34, 0x56 };
+    const bytes = [_]u8{ 0x12, 0x00, 0x34, 0x56 };
     var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Little };
     const first: u8 = try reader.next(u8);
-    const second: i16 = try reader.next(i16);
     try testing.expectEqual(@as(u8, 0x12), first);
+    const second: i16 = try reader.next(i16);
     try testing.expectEqual(@as(i16, 0x5634), second);
     const last = reader.next(u8);
 
@@ -183,4 +211,37 @@ test "reader can consume array of int64" {
         BytesReader.BytesReaderError.EndOfStream,
         last,
     );
+}
+
+test "reader can consume variant" {
+    // 0x01 0x74 0x00                          signature bytes (length = 1, signature = 't' and trailing nul)
+    //                0x00 0x00 0x00 0x00 0x00 padding to 8-byte boundary
+    // 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x05 8 bytes of contained value
+    const bytes = [_]u8{
+        0x01, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+    };
+    var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Big };
+    const sig_str: []const u8 = try reader.nextSignature();
+    try testing.expectEqualStrings("t", sig_str);
+    var signature: Signature = try Signature.make(sig_str, testing.allocator);
+    defer signature.deinit();
+
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .UINT64_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+
+    for (signature.vectorized.items) |t| {
+        switch (t) {
+            DBusType.UINT64_TYPE => |_| {
+                const five: u64 = try reader.next(u64);
+                try testing.expectEqual(@as(u64, 5), five);
+            },
+            else => unreachable,
+        }
+    }
 }
