@@ -1,5 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
+const typesys = @import("typesys.zig");
+const DBusType = typesys.DBusType;
+const Signature = typesys.Signature;
+const BytesReader = @import("bytes.zig").BytesReader;
 
 const Connector = struct {
     pub fn init() void {}
@@ -96,6 +100,42 @@ test "validate object path checking 2" {
 
 test {
     _ = @import("typesys.zig");
-    // _ = @import("bytes.zig");
+    _ = @import("bytes.zig");
     // _ = @import("msg.zig");
+}
+
+test "reader can consume variant" {
+    // 0x01 0x74 0x00                          signature bytes (length = 1, signature = 't' and trailing nul)
+    //                0x00 0x00 0x00 0x00 0x00 padding to 8-byte boundary
+    // 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x05 8 bytes of contained value
+    const bytes = [_]u8{
+        0x01, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+    };
+    var reader = BytesReader{ .bytes = &bytes, .endian = std.builtin.Endian.Big };
+    const sig_str: []const u8 = try reader.nextSignature();
+    try testing.expectEqualStrings("t", sig_str);
+    var signature: Signature = try Signature.make(sig_str, testing.allocator);
+    defer signature.deinit();
+
+    try testing.expectEqualSlices(
+        DBusType,
+        &.{
+            DBusType{ .UINT64_TYPE = {} },
+        },
+        signature.vectorized.items,
+    );
+
+    for (signature.vectorized.items) |t| {
+        switch (t) {
+            DBusType.UINT64_TYPE => |_| {
+                const five: ?u64 = try reader.next(u64);
+                try testing.expectEqual(@as(u64, 0), five);
+            },
+            else => unreachable,
+        }
+    }
+
+    const what: ?u8 = try reader.next(u8);
+    try testing.expectEqual(@as(u8, 5), what);
 }

@@ -7,9 +7,64 @@
 const std = @import("std");
 const testing = std.testing;
 const typesys = @import("typesys.zig");
+const Signature = typesys.Signature;
 const BytesReader = @import("bytes.zig").BytesReader;
 const DBusType = typesys.DBusType;
 const Endian = std.builtin.Endian;
+const Allocator = std.mem.Allocator;
+
+const header_sig_string = "yyyyuua(yv)";
+
+const HeaderReader = struct {
+    // byte slice with header and body included.
+    // the header is always located the beginning of the slice.
+    signature: Signature = undefined,
+    allocator: Allocator,
+
+    const Self = @This();
+
+    pub fn init(self: *Self) !void {
+        self.signature = try Signature.make(header_sig_string, self.allocator);
+    }
+
+    pub fn read_header(self: *Self, bytes: []const u8) !MessageHeader {
+        _ = bytes;
+        var sig_pos: usize = 0;
+        const sig_types = self.signature.vectorized.items;
+
+        while (sig_pos < sig_types.len) : (sig_pos += 1) {
+            const sig_type = sig_types[sig_pos];
+            switch (sig_type) {
+                DBusType.BYTE_TYPE => |_| {},
+            }
+        }
+    }
+};
+
+test "can read a simple header" {
+    var header_reader = HeaderReader{ .allocator = testing.allocator };
+    try header_reader.init();
+    header_reader.read_header([_]u8{
+        'B', // endian
+        0x01, // msg_type
+        0x00, // header_flags
+        0x01, // major_version
+        0x00, 0x00, 0x00, 0x00, // body_length
+        0x00, 0x00, 0x00, 0x00, // serial
+        0x00, 0x00, 0x00, 0x00, // header_fields
+    });
+}
+
+const MessageHeader = struct {
+    endian: Endian,
+    msg_type: MsgType,
+    header_flags: HeaderFlags,
+    major_version: u8,
+    body_length: u32,
+    serial: u32,
+    body: []const u8,
+    header_fields: std.ArrayList(HeaderField),
+};
 
 const MessageReader = struct {
     bytesReader: BytesReader,
