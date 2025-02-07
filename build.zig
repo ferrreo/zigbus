@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     // running `zig build`).
     b.installArtifact(lib);
 
+    // Export the module
+    _ = b.addModule("zigbus", .{
+        .root_source_file = .{ .cwd_relative = "src/main.zig" },
+    });
+
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const main_tests = b.addTest(.{
